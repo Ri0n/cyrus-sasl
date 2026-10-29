@@ -288,6 +288,17 @@ print_hash (const char * func, const char * hash, size_t hash_size)
 #endif
 
 
+/* The length is public; compare every byte of a key or proof. */
+static int scram_key_equal(const char *left, const char *right, size_t length)
+{
+    volatile unsigned char difference = 0;
+    size_t i;
+
+    for (i = 0; i < length; i++)
+        difference |= (unsigned char)left[i] ^ (unsigned char)right[i];
+    return difference == 0;
+}
+
 /* SCRAM derives one hash-sized block of PBKDF2 output. */
 static int
 Hi (const sasl_utils_t *utils __attribute__((unused)),
@@ -340,7 +351,6 @@ GenerateScramSecrets (const sasl_utils_t * utils,
 {
     char SaltedPassword[SASL_MAX_HASH_SIZE];
     char ClientKey[SASL_MAX_HASH_SIZE];
-    sasl_secret_t *sec = NULL;
 
     int result;
     size_t hash_size = md->hash_size;
@@ -353,20 +363,11 @@ GenerateScramSecrets (const sasl_utils_t * utils,
 	goto cleanup;
     }
 
-    sec = utils->malloc(sizeof(sasl_secret_t) + password_len);
-    if (sec == NULL) {
-	result = SASL_NOMEM;
-	goto cleanup;
-    }
-	
-    sec->len = (unsigned) password_len;
-    strncpy((char *)sec->data, password, password_len + 1);
-
     /* SaltedPassword  := Hi(password, salt) */
     result = Hi(utils,
         md,
-        (const char *) sec->data,
-        sec->len,
+        password,
+        password_len,
         salt,
         salt_len,
         iteration_count,
@@ -408,9 +409,8 @@ GenerateScramSecrets (const sasl_utils_t * utils,
     result = SASL_OK;
 
 cleanup:
-    if (sec) {
-	_plug_free_secret(utils, &sec);
-    }
+    utils->erasebuffer(SaltedPassword, sizeof(SaltedPassword));
+    utils->erasebuffer(ClientKey, sizeof(ClientKey));
     return result;
 }
 
@@ -1450,14 +1450,12 @@ scram_server_mech_step2(server_context_t *text,
 	goto cleanup;
     }
     
-    for (k = 0; k < hash_size; k++) {
-	if (CalculatedStoredKey[k] != text->StoredKey[k]) {
-	    SETERROR(sparams->utils, "StoredKey mismatch");
-	    result = SASL_BADAUTH;
-	    goto cleanup;
-	}
+    if (!scram_key_equal(CalculatedStoredKey, text->StoredKey, hash_size)) {
+        SETERROR(sparams->utils, "StoredKey mismatch");
+        result = SASL_BADAUTH;
+        goto cleanup;
     }
-    
+
     /* ServerSignature := HMAC(ServerKey, AuthMessage) */
     if ((result = _sasl_crypto_hmac(&text->md,
              (const unsigned char *) text->ServerKey,
@@ -1529,6 +1527,11 @@ scram_server_mech_step2(server_context_t *text,
     result = SASL_OK;
     
 cleanup:
+    sparams->utils->erasebuffer(ReceivedClientKey, sizeof(ReceivedClientKey));
+    sparams->utils->erasebuffer(DecodedClientProof, sizeof(DecodedClientProof));
+    sparams->utils->erasebuffer(CalculatedStoredKey, sizeof(CalculatedStoredKey));
+    sparams->utils->erasebuffer(ClientSignature, sizeof(ClientSignature));
+    sparams->utils->erasebuffer(ServerSignature, sizeof(ServerSignature));
     if (inbuf != NULL) {
 	sparams->utils->free(inbuf);
     }
@@ -1547,6 +1550,7 @@ static int scram_server_mech_step(void *conn_context,
 				  unsigned *serveroutlen,
 				  sasl_out_params_t *oparams)
 {
+    int result;
     server_context_t *text = (server_context_t *) conn_context;
     const char *scram_sasl_mech = NULL;
     
@@ -1554,6 +1558,8 @@ static int scram_server_mech_step(void *conn_context,
     *serveroutlen = 0;
     
     if (text == NULL) {
+	sparams->utils->erasebuffer(text->StoredKey, sizeof(text->StoredKey));
+	sparams->utils->erasebuffer(text->ServerKey, sizeof(text->ServerKey));
 	return SASL_BADPROT;
     }
 
@@ -1588,13 +1594,17 @@ static int scram_server_mech_step(void *conn_context,
 
     case 2:
 	text->state++;
-	return scram_server_mech_step2(text,
+	result = scram_server_mech_step2(text,
 				       sparams,
 				       clientin,
 				       clientinlen,
 				       serverout,
 				       serveroutlen,
 				       oparams);
+
+        sparams->utils->erasebuffer(text->StoredKey, sizeof(text->StoredKey));
+        sparams->utils->erasebuffer(text->ServerKey, sizeof(text->ServerKey));
+        return result;
 
     default: /* should never get here */
 	sparams->utils->log(NULL, SASL_LOG_ERR,
@@ -1616,6 +1626,10 @@ static int scram_setpass(void *glob_context,
 			 unsigned flags)
 {
     int r;
+    char StoredKey[SASL_MAX_HASH_SIZE + 1];
+    char ServerKey[SASL_MAX_HASH_SIZE + 1];
+    char base64_StoredKey[BASE64_LEN(SASL_MAX_HASH_SIZE) + 1];
+    char base64_ServerKey[BASE64_LEN(SASL_MAX_HASH_SIZE) + 1];
     char *user = NULL;
     char *user_only = NULL;
     char *realm = NULL;
@@ -1683,10 +1697,6 @@ static int scram_setpass(void *glob_context,
 	char salt[SALT_SIZE + 1];
 	char base64_salt[BASE64_LEN(SALT_SIZE) + 1];
 	/* size_t salt_len = SALT_SIZE; */
-	char StoredKey[SASL_MAX_HASH_SIZE + 1];
-	char ServerKey[SASL_MAX_HASH_SIZE + 1];
-	char base64_StoredKey[BASE64_LEN(SASL_MAX_HASH_SIZE) + 1];
-	char base64_ServerKey[BASE64_LEN(SASL_MAX_HASH_SIZE) + 1];
 	size_t secret_len;
 	unsigned int iteration_count = DEFAULT_ITERATION_COUNTER;
 	char * s_iteration_count;
@@ -1831,6 +1841,10 @@ static int scram_setpass(void *glob_context,
                         scram_sasl_mech);
     
   cleanup:
+    sparams->utils->erasebuffer(StoredKey, sizeof(StoredKey));
+    sparams->utils->erasebuffer(ServerKey, sizeof(ServerKey));
+    sparams->utils->erasebuffer(base64_StoredKey, sizeof(base64_StoredKey));
+    sparams->utils->erasebuffer(base64_ServerKey, sizeof(base64_ServerKey));
     if (user) 	_plug_free_string(sparams->utils, &user);
     if (user_only)     _plug_free_string(sparams->utils, &user_only);
     if (realm) 	_plug_free_string(sparams->utils, &realm);
@@ -1861,6 +1875,7 @@ static void scram_server_mech_dispose(void *conn_context,
 	text->gs2_header = NULL;
     }
 
+    utils->erasebuffer((char *)text, sizeof(*text));
     utils->free(text);
 }
 
@@ -2723,6 +2738,14 @@ scram_client_mech_step2(client_context_t *text,
     result = SASL_CONTINUE;
     
 cleanup:
+    if (text->free_password) {
+        _plug_free_secret(params->utils, &text->password);
+        text->free_password = 0;
+    }
+    params->utils->erasebuffer(ClientKey, sizeof(ClientKey));
+    params->utils->erasebuffer(StoredKey, sizeof(StoredKey));
+    params->utils->erasebuffer(ClientSignature, sizeof(ClientSignature));
+    params->utils->erasebuffer(ClientProof, sizeof(ClientProof));
     if (inbuf != NULL) {
 	params->utils->free(inbuf);
     }
@@ -2761,7 +2784,7 @@ scram_client_mech_step3(client_context_t *text,
     char ServerKey[SASL_MAX_HASH_SIZE];
     char ServerSignature[SASL_MAX_HASH_SIZE];
 
-    size_t k, hash_size = text->md.hash_size;
+    size_t hash_size = text->md.hash_size;
     const char *scram_sasl_mech = scram_sasl_mech_name(hash_size);
 
     if (serverinlen < 3) {
@@ -2833,12 +2856,10 @@ scram_client_mech_step3(client_context_t *text,
 	goto cleanup;
     }
 
-    for (k = 0; k < hash_size; k++) {
-	if (DecodedServerProof[k] != ServerSignature[k]) {
-	    SETERROR(params->utils, "ServerSignature mismatch");
-	    result = SASL_BADAUTH;
-	    goto cleanup;
-	}
+    if (!scram_key_equal(DecodedServerProof, ServerSignature, hash_size)) {
+        SETERROR(params->utils, "ServerSignature mismatch");
+        result = SASL_BADAUTH;
+        goto cleanup;
     }
 
     /* set oparams */
@@ -2854,6 +2875,9 @@ scram_client_mech_step3(client_context_t *text,
     result = SASL_OK;
 
 cleanup:
+    params->utils->erasebuffer(DecodedServerProof, sizeof(DecodedServerProof));
+    params->utils->erasebuffer(ServerKey, sizeof(ServerKey));
+    params->utils->erasebuffer(ServerSignature, sizeof(ServerSignature));
     return result;
 }
 
@@ -2878,6 +2902,7 @@ static int scram_client_mech_step(void *conn_context,
 	params->utils->seterror(params->utils->conn, 0,
                                 "%s input longer than " STRINGIZE((MAX_SERVERIN_LEN)) " bytes",
                                 scram_sasl_mech);
+	params->utils->erasebuffer(text->SaltedPassword, sizeof(text->SaltedPassword));
 	return SASL_BADPROT;
     }
     
@@ -2925,6 +2950,8 @@ static int scram_client_mech_step(void *conn_context,
     if (result != SASL_INTERACT) {
 	text->state++;
     }
+    if (result != SASL_CONTINUE && result != SASL_INTERACT)
+        params->utils->erasebuffer(text->SaltedPassword, sizeof(text->SaltedPassword));
     return result;
 }
 
@@ -2955,6 +2982,7 @@ static void scram_client_mech_dispose(void *conn_context,
     if (text->nonce) _plug_free_string(utils,&(text->nonce));
     if (text->salt) utils->free(text->salt);
 
+    utils->erasebuffer((char *)text, sizeof(*text));
     utils->free(text);
 }
 
