@@ -331,12 +331,27 @@ else
   AC_MSG_RESULT(disabled)
 fi
 
-CMU_HAVE_OPENSSL
-AC_MSG_CHECKING(for OpenSSL)
-AC_MSG_RESULT($with_openssl)
-if test "$with_openssl" = no; then
-  AC_MSG_ERROR(OpenSSL not found)
-fi
+AC_ARG_WITH(crypto,
+  [AS_HELP_STRING([--with-crypto=openssl|callbacks],
+                  [cryptographic backend (default: openssl)])],
+  [], [with_crypto=openssl])
+AS_CASE([$with_crypto],
+  [openssl], [
+    CMU_HAVE_OPENSSL
+    AC_MSG_CHECKING(for OpenSSL)
+    AC_MSG_RESULT($with_openssl)
+    AS_IF([test "$with_openssl" = no], [AC_MSG_ERROR([OpenSSL not found])])
+    AC_DEFINE([HAVE_OPENSSL], [1], [Use the built-in OpenSSL crypto backend])
+    CRYPTO_LIBS="-lcrypto $LIB_RSAREF"
+  ],
+  [callbacks], [
+    with_openssl=no
+    CRYPTO_LIBS=
+    AC_DEFINE([HAVE_SHA512], [1], [Do we have SHA512?])
+  ],
+  [AC_MSG_ERROR([unsupported cryptographic backend: $with_crypto])])
+AC_SUBST([CRYPTO_LIBS])
+AM_CONDITIONAL([HAVE_OPENSSL], [test "$with_crypto" = openssl])
 
 dnl SCRAM
 AC_ARG_ENABLE(scram, [  --enable-scram            enable SCRAM authentication [[yes]] ],
@@ -346,7 +361,7 @@ AC_ARG_ENABLE(scram, [  --enable-scram            enable SCRAM authentication [[
 AC_MSG_CHECKING(SCRAM)
 if test "$scram" != no; then
   AC_MSG_RESULT(enabled)
-  SCRAM_LIBS="-lcrypto $LIB_RSAREF"
+  SCRAM_LIBS="$CRYPTO_LIBS"
 
   SASL_MECHS="$SASL_MECHS libscram.la"
   if test "$enable_static" = yes; then
@@ -360,13 +375,17 @@ else
   AC_MSG_RESULT(disabled)
 fi
 
+AM_CONDITIONAL([SCRAM], [test "$scram" != no])
+
 dnl OTP
 AC_ARG_ENABLE(otp, [  --enable-otp            enable OTP authentication [[yes]] ],
   otp=$enableval,
-  otp=yes)
+  AS_IF([test "$with_crypto" = openssl], [otp=yes], [otp=no]))
 
 AC_MSG_CHECKING(OTP)
 if test "$otp" != no; then
+  AS_IF([test "$with_crypto" != openssl],
+        [AC_MSG_ERROR([OTP requires --with-crypto=openssl])])
   AC_MSG_RESULT(enabled)
   OTP_LIBS="-lcrypto $LIB_RSAREF"
 
@@ -418,6 +437,8 @@ AC_ARG_ENABLE(srp, [  --enable-srp            enable SRP authentication [[no]] ]
 
 AC_MSG_CHECKING(SRP)
 if test "$srp" != no; then
+  AS_IF([test "$with_crypto" != openssl],
+        [AC_MSG_ERROR([SRP requires --with-crypto=openssl])])
   AC_MSG_RESULT(enabled)
   SRP_LIBS="-lcrypto $LIB_RSAREF"
 
@@ -590,6 +611,8 @@ AC_ARG_ENABLE(passdss, [  --enable-passdss        enable PASSDSS authentication 
 
 AC_MSG_CHECKING(PASSDSS)
 if test "$passdss" != no; then
+  AS_IF([test "$with_crypto" != openssl],
+        [AC_MSG_ERROR([PASSDSS requires --with-crypto=openssl])])
   AC_MSG_RESULT(enabled)
   PASSDSS_LIBS="-lcrypto $LIB_RSAREF"
   AC_SUBST(PASSDSS_LIBS)
@@ -667,7 +690,7 @@ fi
 LDAP_LIBS=""
 if test "$with_ldap" != no; then
   AC_CHECK_LIB(ldap, ldap_initialize, [ AC_DEFINE(HAVE_LDAP,[],[Support for LDAP?])
-                                        LDAP_LIBS="-lldap -llber -lcrypto $LIB_RSAREF"
+                                        LDAP_LIBS="-lldap -llber $CRYPTO_LIBS"
 					],,-llber)
 fi
 AC_SUBST(LDAP_LIBS)

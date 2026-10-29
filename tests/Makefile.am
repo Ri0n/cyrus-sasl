@@ -42,7 +42,7 @@
 #
 ################################################################
 
-AM_CPPFLAGS=-I$(top_srcdir)/include -DPLUGINDIR='"${top_srcdir}/plugins/.libs"'
+AM_CPPFLAGS=-I$(top_srcdir)/include -I$(top_srcdir)/common -DPLUGINDIR='"${top_srcdir}/plugins/.libs"'
 
 COMMON_LDADD = ../lib/libsasl2.la $(GSSAPIBASE_LIBS) $(GSSAPI_LIBS) $(LIB_SOCKET)
 
@@ -58,20 +58,31 @@ t_gssapi_srv_SOURCES = \
 
 t_gssapi_srv_LDADD = $(COMMON_LDADD)
 
-check_PROGRAMS = \
+check_PROGRAMS = t_crypto \
 	t_gssapi_cli \
 	t_gssapi_srv \
 	$(NULL)
 
+t_crypto_SOURCES = t_crypto.c
+t_crypto_LDADD = ../common/libsasl_crypto.la $(CRYPTO_LIBS) $(LIB_SOCKET)
+
+TESTS = t_crypto
+if SCRAM
+check_PROGRAMS += t_scram
+TESTS += t_scram t_scram_global.sh
+t_scram_SOURCES = t_scram.c ../plugins/scram.c
+t_scram_LDADD = ../lib/libsasl2.la ../common/libplugin_common.la ../common/libsasl_crypto.la $(CRYPTO_LIBS) $(LIB_SOCKET)
+endif
+
 noinst_PROGRAMS = $(check_PROGRAMS)
 
 EXTRA_DIST = \
-	runtests.py \
+	runtests.py t_scram_global.sh \
 	$(NULL)
 
 all: $(check_PROGRAMS)
 
-check:
+check-local:
 if MACOSX
 # skip Mac OSX for now
 else
