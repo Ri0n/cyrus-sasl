@@ -2336,6 +2336,7 @@ scram_client_mech_step2(client_context_t *text,
     char * cb_encoded = NULL;
     char * cb_bin = NULL;
     int result;
+    unsigned long iteration_count;
     char ClientKey[SASL_MAX_HASH_SIZE];
     char StoredKey[SASL_MAX_HASH_SIZE];
     char ClientSignature[SASL_MAX_HASH_SIZE];
@@ -2449,8 +2450,9 @@ scram_client_mech_step2(client_context_t *text,
     }
 
     errno = 0;
-    text->iteration_count = strtoul(counter, &end, 10);
-    if (counter == end || *end != '\0' || errno != 0) {
+    iteration_count = strtoul(counter, &end, 10);
+    if (*counter < '1' || *counter > '9' ||
+        counter == end || *end != '\0' || errno != 0) {
 	params->utils->seterror(params->utils->conn, 0,
                                 "Invalid iteration-count in %s input",
                                 scram_sasl_mech);
@@ -2458,17 +2460,19 @@ scram_client_mech_step2(client_context_t *text,
 	goto cleanup;
     }
 
-    if (text->iteration_count < MIN_ITERATION_COUNTER) {
+    if (iteration_count < MIN_ITERATION_COUNTER) {
 	SETERROR(params->utils, "iteration-count is too small, refusing to compute");
 	result = SASL_BADPROT;
 	goto cleanup;
     }
 
-    if (text->iteration_count > MAX_ITERATION_COUNTER) {
+    if (iteration_count > MAX_ITERATION_COUNTER) {
 	SETERROR(params->utils, "iteration-count is too big, refusing to compute");
 	result = SASL_BADPROT;
 	goto cleanup;
     }
+
+    text->iteration_count = (unsigned)iteration_count;
 
     /* The client MUST verify that the initial part of the nonce
        used in subsequent messages is the same as the nonce it
